@@ -1,20 +1,34 @@
+
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeCron } from "@/app/lib/cron-auth";
 import { runAttendanceCheck } from "@/app/lib/sumhr-attendance";
 
 export async function GET(request: NextRequest) {
   const denied = authorizeCron(request);
-  if (denied) return denied;
+
+  if (denied) {
+    return denied;
+  }
 
   try {
-    const result = await runAttendanceCheck("clock-out");
-    return NextResponse.json(result, { status: 200 });
-  } catch (error) {
-    console.error("Scheduled clock-out check failed", {
-      error: error instanceof Error ? error.message : "Unknown error",
+    const result = await runAttendanceCheck("clock_out");
+
+    return NextResponse.json({
+      success: true,
+      action: "clock-out-check",
+      result,
     });
+  } catch (error) {
+    console.error(
+      "Clock-out attendance check failed:",
+      error instanceof Error ? error.message : "Unknown error"
+    );
+
     return NextResponse.json(
-      { success: false, action: "clock-out", message: "Scheduled check failed" },
+      {
+        success: false,
+        message: "Clock-out attendance check failed",
+      },
       { status: 500 }
     );
   }

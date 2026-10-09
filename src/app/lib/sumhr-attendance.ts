@@ -1,132 +1,163 @@
-export type AttendanceAction = "clock-in" | "clock-out";
 
-type SumHrResponse = {
-  error?: unknown;
-  result?: unknown;
-  message?: string;
-};
+import "server-only";
 
-type LoginResult = {
-  token?: string | null;
-};
+export type AttendanceRequestType = "clock_in" | "clock_out";
 
-function requiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+interface SumHRResponse<T> {
+  error: unknown | null;
+  result: T;
+}
+
+interface LoginResult {
+  token: string;
+}
+
+interface PunchLog {
+  [key: string]: unknown;
+}
+
+interface AttendanceCheckResult {
+  username: string;
+  requestType: AttendanceRequestType;
+  punchCount: number;
+  appearsClockedIn: boolean;
+  message: string;
+}
+
+const SUMHR_API = "https://api.sumhr.io:3000/api";
+
+function getRequiredEnv(name: string): string {
+  const value = process.env[name];
+
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+
   return value;
 }
 
-async function postSumHr(
-  url: string,
-  authorization: string,
-  payload: Record<string, unknown>,
-): Promise<SumHrResponse> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: authorization,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const data = (await response.json().catch(() => null)) as SumHrResponse | null;
-  if (!response.ok || !data) {
-    throw new Error(`SumHR request failed with HTTP ${response.status}`);
+export async function runAttendanceCheck(
+  requestType: AttendanceRequestType
+): Promise<AttendanceCheckResult[]> {
+  if (requestType !== "clock_in" && requestType !== "clock_out") {
+    throw new Error("Invalid attendance request type");
   }
-  return data;
-}
 
-function indiaDateAtMidnightUtc(): string {
-  // Build the calendar date in Asia/Kolkata, independent of the server's timezone.
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  const subscriptionKey = getRequiredEnv("SUMHR_KEY");
+  const username = getRequiredEnv("SUMHR_USERNAME");
+  const password = getRequiredEnv("SUMHR_PASSWORD");
+  const subscriptionId = getRequiredEnv("SUMHR_SUBSCRIPTION_ID");
+
+  const now = new Date();
+
+  // Use India Standard Time to determine the weekday.
+  const indiaDate = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(new Date());
-  const part = (type: string) => parts.find((item) => item.type === type)?.value;
-  const year = part("year");
-  const month = part("month");
-  const day = part("day");
-  if (!year || !month || !day) throw new Error("Could not determine today's India date");
-  return `${year}-${month}-${day}T00:00:00.000Z`;
-}
+  }).format(now);
 
-/**
- * Re-authenticates with SumHR and checks today's punch log.
- * This helper deliberately does not create or alter punch records.
- */
-export async function runAttendanceCheck(action: AttendanceAction) {
-  const subscriptionKey = requiredEnv("SUMHR_KEY");
-  const username = requiredEnv("SUMHR_USERNAME");
-  const password = requiredEnv("SUMHR_PASSWORD");
-  const subscriptionId = requiredEnv("SUMHR_SUBSCRIPTION_ID");
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short",
+  }).format(now);
 
-  const browserDetail = process.env.SUMHR_BROWSER_DETAIL?.trim() || "chrome";
-  const systemDetail =
-    process.env.SUMHR_SYSTEM_DETAIL?.trim() ||
-    "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
-  const loginType = Number(process.env.SUMHR_LOGIN_TYPE || "1");
-  if (!Number.isInteger(loginType)) throw new Error("SUMHR_LOGIN_TYPE must be an integer");
-
-  const login = await postSumHr(
-    "https://api.sumhr.io:3000/api/subscription/passwordlogin",
-    subscriptionKey,
-    {
+  if (weekday === "Sun") {
+    return [{
       username,
-      password,
-      subscriptionid: subscriptionId,
-      browserdetail: browserDetail,
-      logintype: loginType,
-      systemdetail: systemDetail,
-    },
+      requestType,
+      punchCount: 0,
+      appearsClockedIn: false,
+      message: "Sunday: no attendance check needed",
+    }];
+  }
+
+  const loginResponse = await fetch(
+    `${SUMHR_API}/subscription/passwordlogin`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: subscriptionKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        username,
+        password,
+        subscriptionid: subscriptionId,
+        browserdetail: "chrome",
+        logintype: 1,
+        systemdetail:
+          "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    }
   );
 
-  if (login.error != null || !Array.isArray(login.result) || login.result.length === 0) {
-    throw new Error("SumHR login failed; check the configured credentials and subscription access");
+  if (!loginResponse.ok) {
+    throw new Error(`SumHR login request failed: HTTP ${loginResponse.status}`);
   }
 
-  const loginResult = login.result[0] as LoginResult;
-  const accessToken = loginResult?.token;
-  if (typeof accessToken !== "string" || !accessToken.trim()) {
-    throw new Error("SumHR login response did not contain an access token");
+  const loginData =
+    (await loginResponse.json()) as SumHRResponse<LoginResult[]>;
+
+  const token =
+    loginData.error == null && Array.isArray(loginData.result)
+      ? loginData.result[0]?.token
+      : undefined;
+
+  if (!token) {
+    throw new Error("SumHR login did not return an access token");
   }
 
-  const logs = await postSumHr(
-    "https://api.sumhr.io:3000/api/attendance/allpunchlogbyempid",
-    accessToken,
-    { shiftdate: indiaDateAtMidnightUtc() },
+  const logsResponse = await fetch(
+    `${SUMHR_API}/attendance/allpunchlogbyempid`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        shiftdate: `${indiaDate}T00:00:00.000Z`,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    }
   );
 
-  if (logs.error != null || !Array.isArray(logs.result)) {
-    throw new Error("SumHR did not return a valid attendance punch log");
+  if (!logsResponse.ok) {
+    throw new Error(
+      `SumHR attendance request failed: HTTP ${logsResponse.status}`
+    );
   }
 
-  const punchCount = logs.result.length;
-  const currentlyClockedIn = punchCount % 2 === 1;
-  const actionNeeded = action === "clock-in" ? !currentlyClockedIn : currentlyClockedIn;
+  const logsData =
+    (await logsResponse.json()) as SumHRResponse<PunchLog[]>;
 
-  // Do not log usernames, passwords, tokens, or punch-log contents.
-  console.info("SumHR attendance status checked", {
-    action,
+  if (logsData.error != null || !Array.isArray(logsData.result)) {
+    throw new Error("SumHR returned an invalid attendance-log response");
+  }
+
+  const punchCount = logsData.result.length;
+  const appearsClockedIn = punchCount % 2 !== 0;
+
+  console.log("SumHR attendance status checked", {
+    requestType,
     punchCount,
-    currentlyClockedIn,
-    actionNeeded,
-    timestamp: new Date().toISOString(),
+    appearsClockedIn,
+    date: indiaDate,
   });
 
-  return {
-    success: true as const,
-    action,
-    currentlyClockedIn,
+  return [{
+    username,
+    requestType,
     punchCount,
-    actionNeeded,
-    timestamp: new Date().toISOString(),
-    message: actionNeeded
-      ? `SumHR login succeeded. Current status indicates ${action} may be needed; no punch was created.`
-      : `SumHR login succeeded. No ${action} action appears necessary; no punch was created.`,
-  };
+    appearsClockedIn,
+    message: appearsClockedIn
+      ? "Attendance log appears clocked in"
+      : "Attendance log appears clocked out",
+  }];
 }
