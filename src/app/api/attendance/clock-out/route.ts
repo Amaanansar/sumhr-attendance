@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { authorizeCron } from "@/app/lib/cron-auth";
-import { runAttendanceCheck } from "@/app/lib/sumhr-attendance";
+import { authorizeCron } from "@/lib/cron-auth";
+import { runAttendanceCheck } from "@/lib/sumhr-attendance";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
