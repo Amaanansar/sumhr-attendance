@@ -5,7 +5,7 @@ import { runAttendanceCheck } from "@/app/lib/sumhr-attendance";
 
 export async function GET(request: NextRequest) {
   const denied = authorizeCron(request);
-
+  console.log(denied, "denied");
   if (denied) {
     return denied;
   }

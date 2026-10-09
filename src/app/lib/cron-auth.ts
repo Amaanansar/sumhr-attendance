@@ -15,7 +15,9 @@ export function authorizeCron(request: NextRequest) {
 
   const authorization = request.headers.get("authorization");
 
+  console.log(authorization, "token");
   if (authorization !== `Bearer ${secret}`) {
+    console.log("Unauthorized access attempt to cron route");
     return NextResponse.json(
       { success: false, message: "Unauthorized" },
       { status: 401 }
